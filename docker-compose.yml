@@ -18,6 +18,9 @@ services:
   backend:
     build:
       context: ./backend
+    env_file:
+      - path: ./backend/.env
+        required: false
     environment:
       APP_ENV: development
       CORS_ORIGINS: http://localhost:3000

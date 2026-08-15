@@ -73,6 +73,8 @@ docker compose up --build
 
 The local stack starts in explicit demo mode unless you add an AI key to the backend environment.
 
+To enable screenshot storage or a live AI provider in Docker, copy `backend/.env.example` to `backend/.env` and add the relevant backend-only values. Docker Compose reads this optional file without replacing the local PostgreSQL connection.
+
 ### Run Without Docker
 
 ```bash
