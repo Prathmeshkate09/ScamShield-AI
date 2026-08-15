@@ -26,6 +26,7 @@ services:
       CORS_ORIGINS: http://localhost:3000
       DATABASE_URL: postgresql+asyncpg://postgres:postgres@database:5432/scamshield
       RUN_MIGRATIONS: "true"
+      LOCAL_AUTH_SCHEMA_ENABLED: "true"
       PORT: 8000
     ports:
       - "8000:8000"
@@ -43,6 +44,9 @@ services:
       context: ./frontend
       args:
         NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
+        NEXT_PUBLIC_SUPABASE_URL: ${NEXT_PUBLIC_SUPABASE_URL:-}
+        NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY: ${NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY:-}
+        NEXT_PUBLIC_SITE_URL: ${NEXT_PUBLIC_SITE_URL:-http://localhost:3000}
     ports:
       - "3000:3000"
     depends_on:

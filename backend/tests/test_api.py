@@ -1,19 +1,67 @@
+import asyncio
 from datetime import UTC, datetime
+from io import BytesIO
 from uuid import UUID
 
+import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 
-from app.api.analyze import optional_repository
 from app.config import Settings
-from app.dependencies import get_analyzer
+from app.core.errors import AuthenticationRequiredError, RateLimiterUnavailableError, RateLimitExceededError
+from app.dependencies import get_analyzer, get_auth_service, get_current_user, get_repository, get_storage_service
 from app.main import create_app
 from app.schemas.analysis import AnalysisResponse, ScamAssessment
 from app.services.ai_service import GeminiProvider, ProviderResult
+from app.services.auth_service import AuthenticatedUser
+from app.services.rate_limiter import RateLimitService
 from app.services.scam_analyzer import ScamAnalyzer
 
+TEST_USER = AuthenticatedUser(id=UUID("00000000-0000-4000-8000-000000000001"), email="tester@example.com")
+OTHER_USER = AuthenticatedUser(id=UUID("00000000-0000-4000-8000-000000000002"), email="other@example.com")
 
-def create_test_client() -> TestClient:
+
+class FakeRepository:
+    def __init__(self) -> None:
+        self.saved: list[tuple[UUID, AnalysisResponse]] = []
+
+    async def save(self, analysis_id, user_id, assessment, input_type, input_text=None, file_path=None):
+        response = AnalysisResponse(
+            id=analysis_id,
+            input_type=input_type,
+            created_at=datetime.now(UTC),
+            **assessment.model_dump(),
+        )
+        self.saved.append((user_id, response))
+        return response, 1
+
+    async def list(self, user_id, page, page_size):
+        records = [record for owner, record in self.saved if owner == user_id]
+        return type("Page", (), {"items": records, "total": len(records)})()
+
+    async def get(self, analysis_id, user_id):
+        return next((record for owner, record in self.saved if owner == user_id and record.id == analysis_id), None)
+
+    async def stats(self, user_id):
+        records = [record for owner, record in self.saved if owner == user_id]
+        return type(
+            "Stats",
+            (),
+            {
+                "total_analyses": len(records),
+                "high_risk_detected": sum(record.risk_level in {"HIGH", "CRITICAL"} for record in records),
+                "critical_scams": sum(record.risk_level == "CRITICAL" for record in records),
+                "most_common_scam_type": records[0].scam_type if records else None,
+            },
+        )()
+
+
+def create_test_client(repository: FakeRepository | None = None, user: AuthenticatedUser | None = TEST_USER) -> TestClient:
     application = create_app(Settings(app_env="test", ai_provider="demo", database_url=None))
+    if user is not None:
+        application.dependency_overrides[get_current_user] = lambda: user
+    if repository is not None:
+        application.dependency_overrides[get_repository] = lambda: repository
     return TestClient(application)
 
 
@@ -26,7 +74,7 @@ def test_health_reports_demo_mode() -> None:
 
 def test_text_analysis_returns_structured_result() -> None:
     payload = {"text": "Your bank account will be blocked in 30 minutes. Complete KYC using this link and enter your OTP."}
-    with create_test_client() as client:
+    with create_test_client(FakeRepository()) as client:
         response = client.post("/api/v1/analyze/text", json=payload)
     body = response.json()
     assert response.status_code == 200
@@ -36,20 +84,20 @@ def test_text_analysis_returns_structured_result() -> None:
 
 
 def test_empty_text_is_rejected() -> None:
-    with create_test_client() as client:
+    with create_test_client(FakeRepository()) as client:
         response = client.post("/api/v1/analyze/text", json={"text": "   "})
     assert response.status_code == 422
     assert response.json()["error"]["code"] == "validation_error"
 
 
 def test_invalid_url_is_rejected() -> None:
-    with create_test_client() as client:
+    with create_test_client(FakeRepository()) as client:
         response = client.post("/api/v1/analyze/url", json={"url": "file:///etc/passwd"})
     assert response.status_code == 422
 
 
 def test_url_analysis_combines_structural_signals() -> None:
-    with create_test_client() as client:
+    with create_test_client(FakeRepository()) as client:
         response = client.post("/api/v1/analyze/url", json={"url": "http://198.51.100.1/login?otp=123456"})
     body = response.json()
     assert response.status_code == 200
@@ -58,7 +106,7 @@ def test_url_analysis_combines_structural_signals() -> None:
 
 
 def test_image_rejects_executable_content() -> None:
-    with create_test_client() as client:
+    with create_test_client(FakeRepository()) as client:
         response = client.post("/api/v1/analyze/image", files={"file": ("payload.exe", b"not an image", "application/octet-stream")})
     assert response.status_code == 415
 
@@ -75,7 +123,7 @@ def test_malformed_provider_response_is_controlled() -> None:
             return ProviderResult(raw_json="not-json", latency_ms=1)
 
     analyzer = ScamAnalyzer(MalformedProvider())
-    with create_test_client() as client:
+    with create_test_client(FakeRepository()) as client:
         client.app.dependency_overrides[get_analyzer] = lambda: analyzer
         response = client.post("/api/v1/analyze/text", json={"text": "hello"})
     assert response.status_code == 502
@@ -94,7 +142,7 @@ def test_provider_exception_is_controlled() -> None:
             raise RuntimeError("provider failed")
 
     analyzer = ScamAnalyzer(FailingProvider())
-    with create_test_client() as client:
+    with create_test_client(FakeRepository()) as client:
         client.app.dependency_overrides[get_analyzer] = lambda: analyzer
         response = client.post("/api/v1/analyze/text", json={"text": "hello"})
     assert response.status_code == 502
@@ -107,32 +155,162 @@ def test_gemini_uses_supported_structured_output_configuration() -> None:
 
 
 def test_analysis_is_persisted_when_repository_is_available() -> None:
-    class FakeRepository:
-        def __init__(self) -> None:
-            self.saved: list[AnalysisResponse] = []
-
-        async def save(self, analysis_id, assessment, input_type, input_text=None, file_path=None):
-            response = AnalysisResponse(
-                id=analysis_id,
-                input_type=input_type,
-                created_at=datetime.now(UTC),
-                **assessment.model_dump(),
-            )
-            self.saved.append(response)
-            return response, 1
-
     repository = FakeRepository()
-    with create_test_client() as client:
-        client.app.dependency_overrides[optional_repository] = lambda: repository
+    with create_test_client(repository) as client:
         response = client.post("/api/v1/analyze/text", json={"text": "Please confirm the delivery time tomorrow."})
     body = response.json()
     assert response.status_code == 200
     assert body["meta"]["persisted"] is True
     assert len(repository.saved) == 1
-    assert isinstance(repository.saved[0].id, UUID)
+    assert repository.saved[0][0] == TEST_USER.id
+    assert isinstance(repository.saved[0][1].id, UUID)
 
 
 def test_history_requires_configured_database() -> None:
-    with create_test_client() as client:
+    with create_test_client(user=TEST_USER) as client:
         response = client.get("/api/v1/analyses")
     assert response.status_code == 503
+
+
+def test_missing_token_is_rejected() -> None:
+    with create_test_client(FakeRepository(), user=None) as client:
+        response = client.post("/api/v1/analyze/text", json={"text": "Check this message"})
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "authentication_required"
+
+
+def test_invalid_token_is_rejected() -> None:
+    class InvalidAuthService:
+        async def get_user(self, access_token):
+            raise AuthenticationRequiredError()
+
+    application = create_app(Settings(app_env="test", ai_provider="demo", database_url=None))
+    application.dependency_overrides[get_auth_service] = lambda: InvalidAuthService()
+    application.dependency_overrides[get_repository] = lambda: FakeRepository()
+    with TestClient(application) as client:
+        response = client.post("/api/v1/analyze/text", headers={"Authorization": "Bearer invalid"}, json={"text": "Check this message"})
+    assert response.status_code == 401
+    assert response.json()["error"]["code"] == "authentication_required"
+
+
+def test_user_history_and_detail_are_isolated() -> None:
+    repository = FakeRepository()
+    with create_test_client(repository, TEST_USER) as client:
+        created = client.post("/api/v1/analyze/text", json={"text": "Confirm the delivery time tomorrow."}).json()["data"]
+        client.app.dependency_overrides[get_current_user] = lambda: OTHER_USER
+        history = client.get("/api/v1/analyses")
+        detail = client.get(f"/api/v1/analyses/{created['id']}")
+    assert history.status_code == 200
+    assert history.json()["data"]["total"] == 0
+    assert detail.status_code == 404
+
+
+def test_image_storage_receives_user_scoped_owner() -> None:
+    class CapturingStorage:
+        def __init__(self) -> None:
+            self.user_id: UUID | None = None
+
+        async def upload_image(self, content, content_type, extension, user_id):
+            self.user_id = user_id
+            return f"users/{user_id}/screenshots/example.{extension}"
+
+    storage = CapturingStorage()
+    image_buffer = BytesIO()
+    Image.new("RGB", (1, 1), "black").save(image_buffer, format="PNG")
+    png = image_buffer.getvalue()
+    with create_test_client(FakeRepository()) as client:
+        client.app.dependency_overrides[get_storage_service] = lambda: storage
+        response = client.post("/api/v1/analyze/image", files={"file": ("message.png", png, "image/png")})
+    assert response.status_code == 503
+    assert storage.user_id == TEST_USER.id
+
+
+class FakeCounterStore:
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+        self.counts: dict[str, int] = {}
+
+    async def ping(self):
+        if self.fail:
+            raise RuntimeError("unavailable")
+        return "PONG"
+
+    async def eval(self, script, keys, args):
+        if self.fail:
+            raise RuntimeError("unavailable")
+        key = keys[0]
+        self.counts[key] = self.counts.get(key, 0) + 1
+        return [self.counts[key], int(args[0])]
+
+
+@pytest.mark.asyncio
+async def test_rate_limit_rejects_after_threshold_and_isolates_users() -> None:
+    settings = Settings(
+        app_env="test",
+        rate_limit_enabled=True,
+        upstash_redis_rest_url="https://example.upstash.io",
+        upstash_redis_rest_token="token",
+        rate_limit_user_per_window=2,
+    )
+    limiter = RateLimitService(settings, FakeCounterStore())
+    await limiter.initialize()
+    await limiter.enforce_user(TEST_USER.id)
+    await limiter.enforce_user(TEST_USER.id)
+    await limiter.enforce_user(OTHER_USER.id)
+    with pytest.raises(RateLimitExceededError) as error:
+        await limiter.enforce_user(TEST_USER.id)
+    assert error.value.headers["Retry-After"] == "60"
+
+
+@pytest.mark.asyncio
+async def test_limiter_outage_fails_closed() -> None:
+    settings = Settings(
+        app_env="test",
+        rate_limit_enabled=True,
+        upstash_redis_rest_url="https://example.upstash.io",
+        upstash_redis_rest_token="token",
+    )
+    limiter = RateLimitService(settings, FakeCounterStore(fail=True))
+    await limiter.initialize()
+    assert limiter.state == "degraded"
+    with pytest.raises(RateLimiterUnavailableError):
+        await limiter.enforce_user(TEST_USER.id)
+
+
+def test_api_rate_limit_returns_retry_after() -> None:
+    settings = Settings(
+        app_env="test",
+        ai_provider="demo",
+        rate_limit_enabled=True,
+        rate_limit_user_per_window=20,
+        rate_limit_scan_per_window=1,
+    )
+    repository = FakeRepository()
+    limiter = RateLimitService(settings, FakeCounterStore())
+    asyncio.run(limiter.initialize())
+    application = create_app(settings)
+    application.dependency_overrides[get_current_user] = lambda: TEST_USER
+    application.dependency_overrides[get_repository] = lambda: repository
+    with TestClient(application) as client:
+        client.app.state.rate_limiter = limiter
+        first = client.post("/api/v1/analyze/text", json={"text": "Please confirm the delivery time tomorrow."})
+        second = client.post("/api/v1/analyze/text", json={"text": "Please confirm the delivery time tomorrow."})
+    assert first.status_code == 200
+    assert second.status_code == 429
+    assert second.headers["Retry-After"] == "60"
+    assert second.json()["error"]["code"] == "rate_limit_exceeded"
+
+
+def test_protected_api_fails_closed_when_limiter_is_unavailable() -> None:
+    settings = Settings(app_env="test", ai_provider="demo", rate_limit_enabled=True)
+    repository = FakeRepository()
+    limiter = RateLimitService(settings, FakeCounterStore(fail=True))
+    asyncio.run(limiter.initialize())
+    application = create_app(settings)
+    application.dependency_overrides[get_current_user] = lambda: TEST_USER
+    application.dependency_overrides[get_repository] = lambda: repository
+    with TestClient(application) as client:
+        client.app.state.rate_limiter = limiter
+        response = client.post("/api/v1/analyze/text", json={"text": "Please confirm the delivery time tomorrow."})
+    assert response.status_code == 503
+    assert response.json()["error"]["code"] == "rate_limiter_unavailable"
