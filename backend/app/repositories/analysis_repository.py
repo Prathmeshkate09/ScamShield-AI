@@ -1,14 +1,21 @@
 from __future__ import annotations
 
+import logging
 import time
 import uuid
 from dataclasses import dataclass
 
 from sqlalchemy import func, select, text
+from sqlalchemy.exc import DisconnectionError, InterfaceError, OperationalError, SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+from app.core.errors import DatabaseUnavailableError
 from app.models.analysis import Analysis
 from app.schemas.analysis import AnalysisResponse, DashboardStats, ScamAssessment
+
+logger = logging.getLogger(__name__)
+
+DATABASE_CONNECTION_ERRORS = (DisconnectionError, InterfaceError, OperationalError, OSError)
 
 
 @dataclass(frozen=True)
@@ -48,14 +55,17 @@ class AnalysisRepository:
             recommendation=assessment.recommendation,
         )
         async with self.session_factory() as session:
-            if self.provision_local_auth_users:
-                await session.execute(
-                    text("INSERT INTO auth.users (id) VALUES (:user_id) ON CONFLICT (id) DO NOTHING"),
-                    {"user_id": user_id},
-                )
-            session.add(record)
-            await session.commit()
-            await session.refresh(record)
+            try:
+                if self.provision_local_auth_users:
+                    await session.execute(
+                        text("INSERT INTO auth.users (id) VALUES (:user_id) ON CONFLICT (id) DO NOTHING"),
+                        {"user_id": user_id},
+                    )
+                session.add(record)
+                await session.commit()
+                await session.refresh(record)
+            except DATABASE_CONNECTION_ERRORS as error:
+                await self._raise_database_unavailable(session, "save", error)
         return self._to_response(record), round((time.perf_counter() - started_at) * 1000)
 
     async def list(self, user_id: uuid.UUID, page: int, page_size: int) -> PaginatedAnalyses:
@@ -68,9 +78,12 @@ class AnalysisRepository:
             .limit(page_size)
         )
         async with self.session_factory() as session:
-            result = await session.execute(statement)
-            records = list(result.scalars())
-            total = await session.scalar(select(func.count(Analysis.id)).where(Analysis.user_id == user_id))
+            try:
+                result = await session.execute(statement)
+                records = list(result.scalars())
+                total = await session.scalar(select(func.count(Analysis.id)).where(Analysis.user_id == user_id))
+            except DATABASE_CONNECTION_ERRORS as error:
+                await self._raise_database_unavailable(session, "list", error)
         return PaginatedAnalyses(
             items=[self._to_response(record) for record in records],
             total=total or 0,
@@ -78,23 +91,29 @@ class AnalysisRepository:
         )
     async def get(self, analysis_id: uuid.UUID, user_id: uuid.UUID) -> AnalysisResponse | None:
         async with self.session_factory() as session:
-            record = await session.scalar(select(Analysis).where(Analysis.id == analysis_id, Analysis.user_id == user_id))
+            try:
+                record = await session.scalar(select(Analysis).where(Analysis.id == analysis_id, Analysis.user_id == user_id))
+            except DATABASE_CONNECTION_ERRORS as error:
+                await self._raise_database_unavailable(session, "get", error)
         return self._to_response(record) if record else None
 
     async def stats(self, user_id: uuid.UUID) -> DashboardStats:
         async with self.session_factory() as session:
-            total = await session.scalar(select(func.count(Analysis.id)).where(Analysis.user_id == user_id))
-            high_risk = await session.scalar(
-                select(func.count(Analysis.id)).where(Analysis.user_id == user_id, Analysis.risk_level.in_(["HIGH", "CRITICAL"]))
-            )
-            critical = await session.scalar(select(func.count(Analysis.id)).where(Analysis.user_id == user_id, Analysis.risk_level == "CRITICAL"))
-            common_type = await session.scalar(
-                select(Analysis.scam_type)
-                .where(Analysis.user_id == user_id)
-                .group_by(Analysis.scam_type)
-                .order_by(func.count(Analysis.id).desc(), Analysis.scam_type.asc())
-                .limit(1)
-            )
+            try:
+                total = await session.scalar(select(func.count(Analysis.id)).where(Analysis.user_id == user_id))
+                high_risk = await session.scalar(
+                    select(func.count(Analysis.id)).where(Analysis.user_id == user_id, Analysis.risk_level.in_(["HIGH", "CRITICAL"]))
+                )
+                critical = await session.scalar(select(func.count(Analysis.id)).where(Analysis.user_id == user_id, Analysis.risk_level == "CRITICAL"))
+                common_type = await session.scalar(
+                    select(Analysis.scam_type)
+                    .where(Analysis.user_id == user_id)
+                    .group_by(Analysis.scam_type)
+                    .order_by(func.count(Analysis.id).desc(), Analysis.scam_type.asc())
+                    .limit(1)
+                )
+            except DATABASE_CONNECTION_ERRORS as error:
+                await self._raise_database_unavailable(session, "stats", error)
         return DashboardStats(
             total_analyses=total or 0,
             high_risk_detected=high_risk or 0,
@@ -116,3 +135,15 @@ class AnalysisRepository:
             recommendation=record.recommendation,
             created_at=record.created_at,
         )
+
+    @staticmethod
+    async def _raise_database_unavailable(session: AsyncSession, operation: str, error: Exception) -> None:
+        try:
+            await session.rollback()
+        except SQLAlchemyError as rollback_error:
+            logger.error(
+                "database.rollback_failed",
+                extra={"operation": operation, "error_type": type(rollback_error).__name__},
+            )
+        logger.error("database.connection_failed", extra={"operation": operation, "error_type": type(error).__name__})
+        raise DatabaseUnavailableError() from error

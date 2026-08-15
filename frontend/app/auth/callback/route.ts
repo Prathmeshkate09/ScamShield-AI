@@ -1,6 +1,6 @@
 import { NextResponse, type NextRequest } from "next/server";
 
-import { getSiteUrl, isSupabaseConfigured } from "@/lib/supabase/config";
+import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { createClient } from "@/lib/supabase/server";
 
 function safeNextPath(value: string | null): string {
@@ -10,7 +10,7 @@ function safeNextPath(value: string | null): string {
 export async function GET(request: NextRequest) {
   const url = new URL(request.url);
   const next = safeNextPath(url.searchParams.get("next"));
-  const siteUrl = getSiteUrl();
+  const siteUrl = request.nextUrl.origin;
   const fallback = new URL("/login", siteUrl);
 
   if (!isSupabaseConfigured()) {
