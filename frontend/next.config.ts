@@ -1,8 +1,11 @@
 import type { NextConfig } from "next";
 
 const nextConfig: NextConfig = {
-  output: "standalone",
   reactStrictMode: true
 };
+
+if (process.env.DOCKER_BUILD === "true") {
+  nextConfig.output = "standalone";
+}
 
 export default nextConfig;
