@@ -12,6 +12,7 @@ Scams exploit urgency, impersonation, social engineering, and requests for money
 
 ScamShield AI combines deterministic security checks with structured AI output:
 
+- **Mandatory account protection** through Supabase Auth: email/password sign-up and verification, Google OAuth, password reset, and logout.
 - **Message analysis** for phishing, banking, KYC, OTP, job, investment, delivery, romance, tech-support, and impersonation patterns.
 - **Screenshot analysis** through a validated private upload and multimodal OpenAI or Gemini analysis.
 - **URL analysis** that inspects only the URL string; the backend never fetches or visits user-provided targets.
@@ -23,18 +24,21 @@ ScamShield AI combines deterministic security checks with structured AI output:
 
 ```mermaid
 flowchart LR
-  Browser[Next.js security dashboard] -->|HTTPS JSON or multipart| API[Stateless FastAPI API]
+  Browser[Next.js security dashboard] -->|Supabase Auth| Auth[Supabase Auth]
+  Browser -->|Bearer token HTTPS JSON or multipart| API[Stateless FastAPI API]
+  API -->|Validate bearer token| Auth
   API --> Signals[URL and file validation]
   API --> AI[OpenAI or Gemini provider]
   API --> DB[(Supabase PostgreSQL)]
   API --> Storage[Private Supabase Storage]
+  API --> Limits[Upstash Redis rate limits]
 
   CDN[CDN / WAF] -. future .-> Browser
   LB[Load balancer] -. future .-> API
   Queue[Queue and AI workers] -. future .-> AI
 ```
 
-PostgreSQL remains the source of truth. Screenshots are stored in Supabase Storage only; the database stores their object path, never the raw binary.
+PostgreSQL remains the source of truth. Screenshots are stored in Supabase Storage only, under authenticated-user paths; the database stores their object path, never the raw binary.
 
 ## Tech Stack
 
@@ -64,16 +68,18 @@ render.yaml
 Docker Compose starts the frontend, backend, and a local PostgreSQL database:
 
 ```bash
-docker compose up --build
+copy .env.example .env
+copy backend\.env.example backend\.env
+docker compose --env-file .env up --build
 ```
 
 - Dashboard: `http://localhost:3000`
 - API docs: `http://localhost:8000/docs`
 - Health: `http://localhost:8000/health`
 
-The local stack starts in explicit demo mode unless you add an AI key to the backend environment.
+Set `NEXT_PUBLIC_SUPABASE_URL` and `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` in the root `.env` before the Docker build. These are public browser values. Set backend-only credentials in `backend/.env`; Docker Compose reads it without replacing the local PostgreSQL connection.
 
-To enable screenshot storage or a live AI provider in Docker, copy `backend/.env.example` to `backend/.env` and add the relevant backend-only values. Docker Compose reads this optional file without replacing the local PostgreSQL connection.
+The local stack starts in explicit demo mode unless you add an AI key to `backend/.env`. Rate limiting is disabled locally by default; set a real Upstash URL/token and `RATE_LIMIT_ENABLED=true` to exercise the shared production limiter.
 
 ### Run Without Docker
 
@@ -100,9 +106,13 @@ npm run dev
 | --- | --- |
 | `DATABASE_URL` | Async PostgreSQL connection string; required for persistent history and statistics |
 | `SUPABASE_URL` | Supabase project URL |
-| `SUPABASE_ANON_KEY` | Reserved public-safe Supabase key; never required in browser code today |
+| `SUPABASE_PUBLISHABLE_KEY` | Public Supabase key used only by the backend to validate bearer tokens; legacy `SUPABASE_ANON_KEY` remains a fallback |
 | `SUPABASE_SERVICE_ROLE_KEY` | Backend-only privileged storage key |
 | `SUPABASE_STORAGE_BUCKET` | Private storage bucket name; defaults to `scam-assets` |
+| `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | Backend-only shared Redis rate-limiter credentials |
+| `RATE_LIMIT_ENABLED` | Must be `true` in Render/production; disabled for a credential-free local demo |
+| `RATE_LIMIT_*_PER_WINDOW` | Configurable health, user, scan, and image limits for the configured window |
+| `LOCAL_AUTH_SCHEMA_ENABLED` | Local-only development shim for Docker PostgreSQL; keep `false` in Supabase/Render |
 | `AI_PROVIDER` | `auto`, `openai`, `gemini`, or `demo` |
 | `OPENAI_API_KEY` / `OPENAI_MODEL` | OpenAI configuration |
 | `GEMINI_API_KEY` / `GEMINI_MODEL` | Gemini configuration |
@@ -116,15 +126,19 @@ With `AI_PROVIDER=auto`, ScamShield chooses OpenAI when `OPENAI_API_KEY` exists,
 | Variable | Purpose |
 | --- | --- |
 | `NEXT_PUBLIC_API_BASE_URL` | Public URL of the FastAPI backend |
+| `NEXT_PUBLIC_SUPABASE_URL` | Public Supabase project URL |
+| `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Public Supabase browser key |
+| `NEXT_PUBLIC_SITE_URL` | Current frontend origin, such as `http://localhost:3000` |
 
 Never place database credentials, service-role keys, or AI keys in a `NEXT_PUBLIC_` variable.
 
 ## Supabase Setup
 
-The project includes `backend/migrations/versions/0001_create_analyses.py`. It creates:
+The project includes `backend/migrations/versions/0001_create_analyses.py` and `0002_add_analysis_user_ownership.py`. Together they create:
 
-- `analyses` with UUID IDs, nullable future `user_id`, input metadata, JSONB flags/actions, risk data, and timestamps.
-- Indexes for `created_at`, `risk_level`, `scam_type`, and `user_id`.
+- `analyses` with UUID IDs, nullable legacy `user_id`, input metadata, JSONB flags/actions, risk data, and timestamps.
+- A `user_id -> auth.users(id)` foreign key using `ON DELETE SET NULL`, preserving legacy rows while requiring every new API analysis to have a verified owner.
+- Indexes for `created_at`, `risk_level`, `scam_type`, `user_id`, and `(user_id, created_at)`.
 - Row Level Security enabled with no public policy because the frontend never accesses the table directly.
 
 Apply the migration with the privileged backend database connection:
@@ -134,9 +148,30 @@ cd backend
 alembic upgrade head
 ```
 
-For screenshot upload, configure `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. The backend creates the `scam-assets` bucket as private on first valid upload. No public object URL is issued by the API.
+For local PostgreSQL, `LOCAL_AUTH_SCHEMA_ENABLED=true` creates lightweight local `auth.users` IDs only so Supabase-verified accounts can satisfy the development foreign key. It is disabled in Render and never replaces Supabase Auth in production.
 
-When authentication is added, retain RLS and add ownership policies based on `user_id`; do not expose the service role to clients.
+For screenshot upload, configure `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`. The backend creates the `scam-assets` bucket as private on first valid upload. Objects are stored at `users/{user_id}/screenshots/...`; no public object URL is issued by the API.
+
+### Configure Supabase Auth
+
+1. In **Authentication → Providers**, enable Email and keep email confirmation enabled.
+2. In **Authentication → URL Configuration**, set the Site URL and add `http://localhost:3000/auth/callback` plus the Vercel `https://<your-domain>/auth/callback` redirect URL.
+3. Copy the project URL and **publishable** key from the Connect dialog to the root `.env` and backend environment. Never use the service-role key in the frontend.
+4. The default Supabase email sender is rate-limited for development. Configure custom SMTP before production email volume. See the [password authentication guide](https://supabase.com/docs/guides/auth/passwords).
+
+### Configure Google Login
+
+1. Create a Google Cloud **Web application** OAuth client.
+2. Add `http://localhost:3000` and the Vercel domain as authorized JavaScript origins.
+3. Add `https://<project-ref>.supabase.co/auth/v1/callback` as the authorized redirect URI.
+4. In Supabase **Authentication → Providers → Google**, enable Google and enter the Google client ID and secret. Keep the Google secret in Google/Supabase only, never in this repository. See the [Google provider guide](https://supabase.com/docs/guides/auth/social-login/auth-google).
+
+### Configure Upstash Rate Limiting
+
+1. Create an Upstash Redis database and copy its REST URL and REST token.
+2. Add both values only to the backend/Render environment and set `RATE_LIMIT_ENABLED=true`.
+3. The service applies fixed-window limits shared by every API instance: `30/minute/IP` for `/health`, `60/minute/user` for authenticated routes, `10/minute/user` for text/URL/voice scans, and `4/minute/user` for image scans.
+4. Protected endpoints fail closed with `503` when Redis is unavailable; `/health` exposes a degraded limiter state. See the [Upstash Python SDK guide](https://upstash.com/docs/redis/sdks/py/gettingstarted).
 
 ## API
 
@@ -166,6 +201,8 @@ All successful responses use:
 | `GET` | `/api/v1/analyses/stats` | Dashboard statistics |
 | `GET` | `/api/v1/analyses/{analysis_id}` | One persisted analysis |
 
+`/health` is public. Every `/api/v1/*` endpoint requires `Authorization: Bearer <Supabase access token>`. History, statistics, details, database writes, and screenshot object paths are scoped to the verified user. A request for another user's analysis returns `404`.
+
 ## Security Decisions
 
 - The API never resolves, opens, or fetches submitted URLs, preventing SSRF through URL analysis.
@@ -173,8 +210,9 @@ All successful responses use:
 - Only PNG, JPG, JPEG, and WEBP are accepted.
 - AI responses are constrained to structured JSON and validated by Pydantic; malformed output gets one safe JSON recovery attempt, then a controlled error.
 - CORS uses an environment allowlist. API keys, OTPs, passwords, and full message content are excluded from structured logs.
+- FastAPI validates every bearer token against Supabase Auth before it authorizes an analysis or reads stored data.
+- Redis-backed limits are atomic and shared between Render instances. Rate-limit responses use the normal error envelope, HTTP `429`, and `Retry-After`; protected routes fail closed if the shared limiter is unavailable.
 - The API is stateless. Persistent data belongs in PostgreSQL and files belong in Supabase Storage.
-- Rate limiting belongs at the Vercel/Render edge or WAF for horizontally consistent enforcement. Add a shared rate-limit backend before exposing high-volume public traffic.
 
 ## Testing
 
@@ -183,7 +221,7 @@ cd backend
 pytest -q
 ```
 
-The current suite covers health, text analysis, empty and invalid input, URL safety checks, file rejection, malformed provider output, persistence through an injected repository, and unavailable history behavior.
+The suite covers health, authenticated text analysis, missing/invalid tokens, empty and invalid input, URL safety checks, file rejection, malformed provider output, user-owned persistence and history isolation, scoped image paths, and rate-limit thresholds/outages.
 
 ```bash
 cd frontend
@@ -196,13 +234,14 @@ npm run build
 ### Vercel Frontend
 
 1. Import the repository and set the root directory to `frontend`.
-2. Set `NEXT_PUBLIC_API_BASE_URL` to the Render backend URL.
-3. Deploy with the default Next.js build command.
+2. Set `NEXT_PUBLIC_API_BASE_URL`, `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, and `NEXT_PUBLIC_SITE_URL`.
+3. Add the deployed `https://<vercel-domain>/auth/callback` URL in Supabase Auth before enabling Google or password-reset emails.
+4. Deploy with the default Next.js build command.
 
 ### Render Backend
 
 1. Create a Docker web service using `backend/Dockerfile`, or use `render.yaml`.
-2. Set `DATABASE_URL`, `CORS_ORIGINS`, Supabase storage values, and one AI-provider key.
+2. Set `DATABASE_URL`, `CORS_ORIGINS`, `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`, `RATE_LIMIT_ENABLED=true`, and one AI-provider key.
 3. Run `alembic upgrade head` once as a pre-deploy or release command.
 4. Keep `RUN_MIGRATIONS=false` on horizontally scaled API instances.
 
@@ -213,17 +252,16 @@ The container listens on `0.0.0.0:$PORT` and exposes `/health`.
 The MVP runs synchronous AI analysis for a responsive hackathon demo. It is intentionally stateless:
 
 1. Start with one FastAPI instance.
-2. Add a load balancer and multiple FastAPI instances.
+2. Add a load balancer and multiple FastAPI instances; auth, ownership data, uploads, and Upstash rate limits remain shared.
 3. Move expensive AI analysis into a durable queue plus worker tier.
-4. Add edge rate limiting, tracing, metrics, and a shared cache only when usage justifies them.
+4. Add edge/WAF rate limiting, tracing, metrics, and a shared cache only when usage justifies them.
 
 AI inference is the expensive bottleneck; PostgreSQL and object storage remain shared sources of truth throughout this evolution.
 
 ## Future Improvements
 
-- Authenticated user history with ownership RLS policies.
 - Audio-file transcription and private audio storage.
 - Signed screenshot review links for authenticated users.
-- Background workers, webhook notifications, and abuse-rate controls.
+- Background workers, webhook notifications, and edge/WAF abuse controls.
 - Threat-intelligence feeds and verified brand-domain detection.
 - Human escalation and official cybercrime-reporting integrations.

@@ -39,6 +39,8 @@ export interface HealthStatus {
   service: string;
   database_configured: boolean;
   storage_configured: boolean;
+  authentication_configured: boolean;
+  rate_limiter: "disabled" | "ready" | "degraded";
 }
 
 export interface ApiSuccess<T> {

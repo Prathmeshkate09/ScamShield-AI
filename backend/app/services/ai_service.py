@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
+import logging
 import re
 import time
 from dataclasses import dataclass
@@ -10,6 +12,9 @@ from typing import Protocol
 from app.config import Settings
 from app.core.errors import AppError, ProviderResponseError
 from app.schemas.analysis import ScamAssessment
+
+
+logger = logging.getLogger(__name__)
 
 
 SYSTEM_PROMPT = """You are ScamShield AI, a cautious security assistant. Analyze user-provided messages, URL strings, voice transcripts, and screenshots for scam risk. Assess evidence such as urgency, threats, impersonation, financial requests, credential or OTP requests, suspicious URLs, social engineering, authority claims, emotional manipulation, and unusual instructions. Do not classify only by keywords. Explain the risk in clear user-facing language. Never provide instructions that would make a scam more effective. Return only the required JSON object."""
@@ -151,6 +156,8 @@ class OpenAIProvider:
 class GeminiProvider:
     name = "gemini"
     mode = "live"
+    _MAX_TRANSIENT_ATTEMPTS = 2
+    _RETRY_DELAY_SECONDS = 0.75
 
     def __init__(self, api_key: str, model: str) -> None:
         from google import genai
@@ -167,27 +174,40 @@ class GeminiProvider:
 
     async def analyze_text(self, content: str, input_type: str, context: str | None = None) -> ProviderResult:
         started_at = time.perf_counter()
-        response = await self.client.aio.models.generate_content(
-            model=self.model,
-            contents=[SYSTEM_PROMPT, build_prompt(content, input_type, context)],
-            config=self._json_config(),
-        )
+        response = await self._generate_content([SYSTEM_PROMPT, build_prompt(content, input_type, context)])
         return ProviderResult(raw_json=response.text, latency_ms=round((time.perf_counter() - started_at) * 1000))
 
     async def analyze_image(self, content: bytes, content_type: str) -> ProviderResult:
         from google.genai import types
 
         started_at = time.perf_counter()
-        response = await self.client.aio.models.generate_content(
-            model=self.model,
-            contents=[
+        response = await self._generate_content(
+            [
                 SYSTEM_PROMPT,
                 build_prompt("Analyze this uploaded screenshot for scam indicators.", "image"),
                 types.Part.from_bytes(data=content, mime_type=content_type),
-            ],
-            config=self._json_config(),
+            ]
         )
         return ProviderResult(raw_json=response.text, latency_ms=round((time.perf_counter() - started_at) * 1000))
+
+    async def _generate_content(self, contents: list[object]) -> object:
+        for attempt in range(self._MAX_TRANSIENT_ATTEMPTS):
+            try:
+                return await self.client.aio.models.generate_content(
+                    model=self.model,
+                    contents=contents,
+                    config=self._json_config(),
+                )
+            except Exception as error:
+                status_code = getattr(error, "code", None)
+                is_transient = status_code in {500, 502, 503, 504}
+                if not is_transient or attempt == self._MAX_TRANSIENT_ATTEMPTS - 1:
+                    raise
+                logger.warning(
+                    "gemini.transient_failure_retrying",
+                    extra={"attempt": attempt + 1, "status_code": status_code},
+                )
+                await asyncio.sleep(self._RETRY_DELAY_SECONDS * (attempt + 1))
 
 
 def select_provider(settings: Settings) -> AIProvider:

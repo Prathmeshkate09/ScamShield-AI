@@ -11,6 +11,7 @@ import {
   Link2,
   LoaderCircle,
   LockKeyhole,
+  LogOut,
   MessageSquareText,
   Mic,
   Send,
@@ -22,8 +23,9 @@ import {
 import type { LucideIcon } from "lucide-react";
 import { useCallback, useEffect, useState } from "react";
 
-import { analyzeImage, analyzeText, analyzeUrl, analyzeVoice, getHealth, getHistory, getStats } from "@/lib/api";
+import { analyzeImage, analyzeText, analyzeUrl, analyzeVoice, ApiError, getHealth, getHistory, getStats } from "@/lib/api";
 import { demoExamples } from "@/lib/examples";
+import { createClient } from "@/lib/supabase/client";
 import type { AnalysisMode, DashboardStats, RiskLevel, ScamAnalysis } from "@/types/analysis";
 
 type SpeechRecognitionAlternative = { transcript: string };
@@ -160,7 +162,7 @@ function ResultPanel({ analysis, isLoading }: { analysis: ScamAnalysis | null; i
   );
 }
 
-export function Dashboard() {
+export function Dashboard({ userEmail }: { userEmail: string }) {
   const [activeMode, setActiveMode] = useState<AnalysisMode>("text");
   const [message, setMessage] = useState("");
   const [url, setUrl] = useState("");
@@ -174,6 +176,7 @@ export function Dashboard() {
   const [isListening, setIsListening] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [persistenceNotice, setPersistenceNotice] = useState<string | null>(null);
+  const [isSigningOut, setIsSigningOut] = useState(false);
 
   const activeCard = modeCards.find((mode) => mode.id === activeMode) ?? modeCards[0];
   const ActiveIcon = activeCard.icon;
@@ -183,11 +186,16 @@ export function Dashboard() {
     if (healthResult.status === "fulfilled") {
       setIsDemoMode(healthResult.value.meta.mode === "demo");
     }
+    const protectedError = [statsResult, historyResult].find((result) => result.status === "rejected");
+    if (protectedError?.status === "rejected" && protectedError.reason instanceof ApiError && protectedError.reason.status === 401) {
+      window.location.assign("/login?error=session");
+      return;
+    }
     if (statsResult.status === "fulfilled") {
       setStats(statsResult.value.data);
       setPersistenceNotice(null);
     } else {
-      setPersistenceNotice("Connect Supabase to save scans and unlock live history.");
+      setPersistenceNotice("Protected history is temporarily unavailable. Please try again shortly.");
     }
     if (historyResult.status === "fulfilled") {
       setHistory(historyResult.value.data.items);
@@ -224,9 +232,22 @@ export function Dashboard() {
       }
       await refreshDashboard();
     } catch (requestError) {
+      if (requestError instanceof ApiError && requestError.status === 401) {
+        window.location.assign("/login?error=session");
+        return;
+      }
       setError(requestError instanceof Error ? requestError.message : "The analysis could not be completed.");
     } finally {
       setIsLoading(false);
+    }
+  };
+
+  const signOut = async () => {
+    setIsSigningOut(true);
+    try {
+      await createClient().auth.signOut();
+    } finally {
+      window.location.assign("/login");
     }
   };
 
@@ -268,9 +289,15 @@ export function Dashboard() {
           <span className="brand-mark"><ShieldCheck size={24} /></span>
           <span>ScamShield <strong>AI</strong></span>
         </a>
-        <div className="topbar-status">
-          <span className={`status-dot ${isDemoMode ? "demo" : "live"}`} />
-          {isDemoMode ? "Demo protection mode" : "Live AI protection"}
+        <div className="account-controls">
+          <div className="topbar-status">
+            <span className={`status-dot ${isDemoMode ? "demo" : "live"}`} />
+            {isDemoMode ? "Demo protection mode" : "Live AI protection"}
+          </div>
+          <span className="account-email" title={userEmail}>{userEmail}</span>
+          <button className="logout-button" disabled={isSigningOut} onClick={() => void signOut()} type="button">
+            <LogOut size={15} /> {isSigningOut ? "Signing out" : "Sign out"}
+          </button>
         </div>
       </header>
 

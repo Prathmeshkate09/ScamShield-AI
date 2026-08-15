@@ -4,6 +4,7 @@ import logging
 import uuid
 from contextlib import asynccontextmanager
 
+import httpx
 from fastapi import FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,6 +16,8 @@ from app.core.errors import AppError
 from app.core.logging import configure_logging
 from app.database import Database
 from app.schemas.common import ErrorResponse
+from app.services.auth_service import SupabaseAuthService
+from app.services.rate_limiter import RateLimitService
 
 logger = logging.getLogger(__name__)
 
@@ -27,8 +30,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(application: FastAPI):
         application.state.settings = app_settings
         application.state.database = Database(app_settings.database_url)
-        yield
-        await application.state.database.dispose()
+        application.state.auth_http_client = httpx.AsyncClient(timeout=httpx.Timeout(5.0))
+        application.state.auth_service = SupabaseAuthService(app_settings, application.state.auth_http_client)
+        application.state.rate_limiter = RateLimitService(app_settings)
+        await application.state.rate_limiter.initialize()
+        try:
+            yield
+        finally:
+            await application.state.auth_http_client.aclose()
+            await application.state.database.dispose()
 
     application = FastAPI(title=app_settings.app_name, version="0.1.0", lifespan=lifespan)
     application.add_middleware(
@@ -36,13 +46,19 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_origins=app_settings.cors_origin_list,
         allow_credentials=False,
         allow_methods=["GET", "POST"],
-        allow_headers=["Content-Type", "X-Request-ID"],
+        allow_headers=["Authorization", "Content-Type", "X-Request-ID"],
     )
 
     @application.middleware("http")
     async def request_context(request: Request, call_next):
         request_id = request.headers.get("X-Request-ID") or str(uuid.uuid4())
         request.state.request_id = request_id
+        if request.method != "OPTIONS" and request.url.path == "/health":
+            client_ip = request.client.host if request.client else "unknown"
+            try:
+                await request.app.state.rate_limiter.enforce_health(client_ip)
+            except AppError as error:
+                return await app_error_handler(request, error)
         content_length = request.headers.get("content-length")
         if content_length and int(content_length) > app_settings.max_upload_bytes + 16_384:
             return JSONResponse(
@@ -61,7 +77,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         request_id = getattr(request.state, "request_id", "unknown")
         logger.warning("request.failed", extra={"request_id": request_id, "error_code": error.code})
         payload = ErrorResponse(error={"code": error.code, "message": error.message, "request_id": request_id})
-        return JSONResponse(status_code=error.status_code, content=payload.model_dump())
+        response = JSONResponse(status_code=error.status_code, content=payload.model_dump())
+        for header, value in error.headers.items():
+            response.headers[header] = value
+        response.headers["X-Request-ID"] = request_id
+        return response
 
     @application.exception_handler(RequestValidationError)
     async def validation_error_handler(request: Request, error: RequestValidationError) -> JSONResponse:

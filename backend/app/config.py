@@ -16,9 +16,19 @@ class Settings(BaseSettings):
     cors_origins: str = "http://localhost:3000"
     database_url: str | None = None
     supabase_url: str | None = None
+    supabase_publishable_key: str | None = None
     supabase_anon_key: str | None = None
     supabase_service_role_key: str | None = None
     supabase_storage_bucket: str = "scam-assets"
+    upstash_redis_rest_url: str | None = None
+    upstash_redis_rest_token: str | None = None
+    rate_limit_enabled: bool = False
+    rate_limit_window_seconds: int = Field(default=60, ge=1, le=3_600)
+    rate_limit_health_per_window: int = Field(default=30, ge=1, le=10_000)
+    rate_limit_user_per_window: int = Field(default=60, ge=1, le=10_000)
+    rate_limit_scan_per_window: int = Field(default=10, ge=1, le=10_000)
+    rate_limit_image_per_window: int = Field(default=4, ge=1, le=10_000)
+    local_auth_schema_enabled: bool = False
     ai_provider: Literal["auto", "openai", "gemini", "demo"] = "auto"
     openai_api_key: str | None = None
     openai_model: str = "gpt-4.1-mini"
@@ -48,3 +58,15 @@ class Settings(BaseSettings):
     @property
     def storage_configured(self) -> bool:
         return bool(self.supabase_url and self.supabase_service_role_key)
+
+    @property
+    def supabase_public_key(self) -> str | None:
+        return self.supabase_publishable_key or self.supabase_anon_key
+
+    @property
+    def auth_configured(self) -> bool:
+        return bool(self.supabase_url and self.supabase_public_key)
+
+    @property
+    def rate_limiter_configured(self) -> bool:
+        return bool(self.upstash_redis_rest_url and self.upstash_redis_rest_token)

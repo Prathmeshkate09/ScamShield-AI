@@ -28,7 +28,7 @@ def validate_image(content: bytes, content_type: str | None, filename: str | Non
         with Image.open(BytesIO(content)) as image:
             actual_format = image.format
             image.verify()
-    except (UnidentifiedImageError, OSError, ValueError) as error:
+    except (SyntaxError, UnidentifiedImageError, OSError, ValueError) as error:
         raise AppError("The upload is not a valid image.", 415, "invalid_image") from error
     if actual_format != ALLOWED_IMAGE_TYPES[content_type]:
         raise AppError("The image content does not match its declared type.", 415, "image_type_mismatch")

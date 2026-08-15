@@ -1,3 +1,5 @@
+import { createClient } from "@/lib/supabase/client";
+import { isSupabaseConfigured } from "@/lib/supabase/config";
 import type { AnalysisHistory, ApiSuccess, DashboardStats, HealthStatus, ScamAnalysis } from "@/types/analysis";
 
 const apiBaseUrl = process.env.NEXT_PUBLIC_API_BASE_URL ?? "http://localhost:8000";
@@ -9,10 +11,24 @@ export class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<ApiSuccess<T>> {
+async function accessToken(): Promise<string> {
+  if (!isSupabaseConfigured()) {
+    throw new ApiError("Authentication is not configured for this environment.", 503);
+  }
+
+  const { data, error } = await createClient().auth.getSession();
+  if (error || !data.session?.access_token) {
+    throw new ApiError("Your session has expired. Please sign in again.", 401);
+  }
+  return data.session.access_token;
+}
+
+async function request<T>(path: string, options?: RequestInit, requireAuthentication = true): Promise<ApiSuccess<T>> {
+  const token = requireAuthentication ? await accessToken() : null;
   const response = await fetch(`${apiBaseUrl}${path}`, {
     ...options,
     headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(options?.body instanceof FormData ? {} : { "Content-Type": "application/json" }),
       ...options?.headers
     }
@@ -26,7 +42,7 @@ async function request<T>(path: string, options?: RequestInit): Promise<ApiSucce
   return payload;
 }
 
-export const getHealth = () => request<HealthStatus>("/health");
+export const getHealth = () => request<HealthStatus>("/health", undefined, false);
 export const getHistory = () => request<AnalysisHistory>("/api/v1/analyses?page=1&page_size=6");
 export const getStats = () => request<DashboardStats>("/api/v1/analyses/stats");
 
