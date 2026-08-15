@@ -6,11 +6,13 @@ from uuid import UUID
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
+from sqlalchemy.exc import OperationalError
 
 from app.config import Settings
-from app.core.errors import AuthenticationRequiredError, RateLimiterUnavailableError, RateLimitExceededError
+from app.core.errors import AuthenticationRequiredError, DatabaseUnavailableError, RateLimiterUnavailableError, RateLimitExceededError
 from app.dependencies import get_analyzer, get_auth_service, get_current_user, get_repository, get_storage_service
 from app.main import create_app
+from app.repositories.analysis_repository import AnalysisRepository
 from app.schemas.analysis import AnalysisResponse, ScamAssessment
 from app.services.ai_service import GeminiProvider, ProviderResult
 from app.services.auth_service import AuthenticatedUser
@@ -57,7 +59,7 @@ class FakeRepository:
 
 
 def create_test_client(repository: FakeRepository | None = None, user: AuthenticatedUser | None = TEST_USER) -> TestClient:
-    application = create_app(Settings(app_env="test", ai_provider="demo", database_url=None))
+    application = create_app(Settings(app_env="test", ai_provider="demo", database_url=None, rate_limit_enabled=False))
     if user is not None:
         application.dependency_overrides[get_current_user] = lambda: user
     if repository is not None:
@@ -70,6 +72,59 @@ def test_health_reports_demo_mode() -> None:
         response = client.get("/health")
     assert response.status_code == 200
     assert response.json()["meta"]["mode"] == "demo"
+    assert response.json()["data"]["database"] == "not_configured"
+    assert response.json()["data"]["status"] == "degraded"
+
+
+def test_database_connection_failure_returns_controlled_error() -> None:
+    class UnavailableRepository(FakeRepository):
+        async def save(self, analysis_id, user_id, assessment, input_type, input_text=None, file_path=None):
+            raise DatabaseUnavailableError()
+
+    with create_test_client(UnavailableRepository()) as client:
+        response = client.post("/api/v1/analyze/text", json={"text": "Please confirm the delivery time tomorrow."})
+
+    assert response.status_code == 503
+    assert response.headers["Retry-After"] == "15"
+    assert response.json()["error"]["code"] == "database_unavailable"
+
+
+def test_repository_maps_connection_refusal_to_controlled_error() -> None:
+    assessment = ScamAssessment(
+        risk_score=10,
+        risk_level="SAFE",
+        scam_type="No Clear Scam Pattern",
+        confidence=0.8,
+        red_flags=[],
+        explanation="No clear scam pattern was detected.",
+        recommendation=["Verify unexpected requests through an official channel."],
+    )
+
+    class FailingSession:
+        rolled_back = False
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc_value, traceback):
+            return False
+
+        def add(self, record):
+            return None
+
+        async def commit(self):
+            raise OperationalError("COMMIT", {}, ConnectionRefusedError("refused"))
+
+        async def rollback(self):
+            self.rolled_back = True
+
+    failing_session = FailingSession()
+    repository = AnalysisRepository(lambda: failing_session)  # type: ignore[arg-type]
+
+    with pytest.raises(DatabaseUnavailableError):
+        asyncio.run(repository.save(UUID("00000000-0000-4000-8000-000000000003"), TEST_USER.id, assessment, "text"))
+
+    assert failing_session.rolled_back is True
 
 
 def test_text_analysis_returns_structured_result() -> None:

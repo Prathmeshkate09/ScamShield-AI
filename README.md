@@ -241,9 +241,10 @@ npm run build
 ### Render Backend
 
 1. Create a Docker web service using `backend/Dockerfile`, or use `render.yaml`.
-2. Set `DATABASE_URL`, `CORS_ORIGINS`, `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`, `RATE_LIMIT_ENABLED=true`, and one AI-provider key.
-3. Run `alembic upgrade head` once as a pre-deploy or release command.
-4. Keep `RUN_MIGRATIONS=false` on horizontally scaled API instances.
+2. In Supabase **Connect**, copy the **Session pooler** URI and use it unchanged for `DATABASE_URL`. Render is IPv4-only, while Supabase's direct database endpoint is IPv6-only without the paid IPv4 add-on. The application converts the copied `postgres://` or `postgresql://` URI to its async SQLAlchemy dialect automatically.
+3. Set `CORS_ORIGINS`, `SUPABASE_URL`, `SUPABASE_PUBLISHABLE_KEY`, `SUPABASE_SERVICE_ROLE_KEY`, `UPSTASH_REDIS_REST_URL`, `UPSTASH_REDIS_REST_TOKEN`, `RATE_LIMIT_ENABLED=true`, and one AI-provider key.
+4. Run `alembic upgrade head` once as a pre-deploy or release command.
+5. Keep `RUN_MIGRATIONS=false` on horizontally scaled API instances.
 
 The container listens on `0.0.0.0:$PORT` and exposes `/health`.
 

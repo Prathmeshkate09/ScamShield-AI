@@ -38,6 +38,7 @@ export interface HealthStatus {
   status: string;
   service: string;
   database_configured: boolean;
+  database: "not_configured" | "ready" | "unavailable";
   storage_configured: boolean;
   authentication_configured: boolean;
   rate_limiter: "disabled" | "ready" | "degraded";

@@ -30,6 +30,16 @@ class PersistenceUnavailableError(AppError):
         super().__init__("Analysis history is unavailable until DATABASE_URL is configured.", 503, "persistence_unavailable")
 
 
+class DatabaseUnavailableError(AppError):
+    def __init__(self) -> None:
+        super().__init__(
+            "Analysis results could not be saved because the database is temporarily unavailable. Please try again shortly.",
+            503,
+            "database_unavailable",
+            {"Retry-After": "15"},
+        )
+
+
 class AuthenticationRequiredError(AppError):
     def __init__(self) -> None:
         super().__init__("A valid sign-in session is required.", 401, "authentication_required", {"WWW-Authenticate": "Bearer"})

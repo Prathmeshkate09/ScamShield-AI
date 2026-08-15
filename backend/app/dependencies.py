@@ -20,6 +20,10 @@ def get_settings(request: Request) -> Settings:
     return request.app.state.settings
 
 
+def get_database(request: Request) -> Database:
+    return request.app.state.database
+
+
 def get_analyzer(request: Request) -> ScamAnalyzer:
     return ScamAnalyzer(select_provider(request.app.state.settings))
 
