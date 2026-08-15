@@ -2,6 +2,7 @@ services:
   - type: web
     name: scamshield-ai-api
     runtime: docker
+    plan: free
     rootDir: backend
     dockerfilePath: Dockerfile
     healthCheckPath: /health
