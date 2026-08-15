@@ -20,3 +20,4 @@ postgres_data/
 dist/
 build/
 *.log
+*.tsbuildinfo
