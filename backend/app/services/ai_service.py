@@ -158,12 +158,19 @@ class GeminiProvider:
         self.client = genai.Client(api_key=api_key)
         self.model = model
 
+    @staticmethod
+    def _json_config() -> dict[str, object]:
+        return {
+            "response_mime_type": "application/json",
+            "response_schema": ScamAssessment,
+        }
+
     async def analyze_text(self, content: str, input_type: str, context: str | None = None) -> ProviderResult:
         started_at = time.perf_counter()
         response = await self.client.aio.models.generate_content(
             model=self.model,
             contents=[SYSTEM_PROMPT, build_prompt(content, input_type, context)],
-            config={"response_format": {"text": {"mime_type": "application/json", "schema": ScamAssessment.model_json_schema()}}},
+            config=self._json_config(),
         )
         return ProviderResult(raw_json=response.text, latency_ms=round((time.perf_counter() - started_at) * 1000))
 
@@ -178,7 +185,7 @@ class GeminiProvider:
                 build_prompt("Analyze this uploaded screenshot for scam indicators.", "image"),
                 types.Part.from_bytes(data=content, mime_type=content_type),
             ],
-            config={"response_format": {"text": {"mime_type": "application/json", "schema": ScamAssessment.model_json_schema()}}},
+            config=self._json_config(),
         )
         return ProviderResult(raw_json=response.text, latency_ms=round((time.perf_counter() - started_at) * 1000))
 

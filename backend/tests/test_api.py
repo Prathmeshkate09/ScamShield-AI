@@ -7,13 +7,13 @@ from app.api.analyze import optional_repository
 from app.config import Settings
 from app.dependencies import get_analyzer
 from app.main import create_app
-from app.schemas.analysis import AnalysisResponse
-from app.services.ai_service import ProviderResult
+from app.schemas.analysis import AnalysisResponse, ScamAssessment
+from app.services.ai_service import GeminiProvider, ProviderResult
 from app.services.scam_analyzer import ScamAnalyzer
 
 
 def create_test_client() -> TestClient:
-    application = create_app(Settings(app_env="test", ai_provider="demo"))
+    application = create_app(Settings(app_env="test", ai_provider="demo", database_url=None))
     return TestClient(application)
 
 
@@ -80,6 +80,30 @@ def test_malformed_provider_response_is_controlled() -> None:
         response = client.post("/api/v1/analyze/text", json={"text": "hello"})
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "invalid_provider_response"
+
+
+def test_provider_exception_is_controlled() -> None:
+    class FailingProvider:
+        name = "test"
+        mode = "live"
+
+        async def analyze_text(self, content: str, input_type: str, context: str | None = None) -> ProviderResult:
+            raise RuntimeError("provider failed")
+
+        async def analyze_image(self, content: bytes, content_type: str) -> ProviderResult:
+            raise RuntimeError("provider failed")
+
+    analyzer = ScamAnalyzer(FailingProvider())
+    with create_test_client() as client:
+        client.app.dependency_overrides[get_analyzer] = lambda: analyzer
+        response = client.post("/api/v1/analyze/text", json={"text": "hello"})
+    assert response.status_code == 502
+    assert response.json()["error"]["code"] == "provider_unavailable"
+
+
+def test_gemini_uses_supported_structured_output_configuration() -> None:
+    config = GeminiProvider._json_config()
+    assert config == {"response_mime_type": "application/json", "response_schema": ScamAssessment}
 
 
 def test_analysis_is_persisted_when_repository_is_available() -> None:
