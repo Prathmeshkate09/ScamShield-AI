@@ -17,7 +17,12 @@ class ProviderResponseError(AppError):
 
 class ProviderUnavailableError(AppError):
     def __init__(self) -> None:
-        super().__init__("The AI provider could not complete this analysis. Please try again.", 502, "provider_unavailable")
+        super().__init__(
+            "The AI provider is temporarily unavailable. Please try again in a moment.",
+            503,
+            "provider_unavailable",
+            {"Retry-After": "15"},
+        )
 
 
 class PersistenceUnavailableError(AppError):

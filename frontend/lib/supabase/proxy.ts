@@ -37,10 +37,14 @@ export async function updateSession(request: NextRequest): Promise<NextResponse>
   const { pathname } = request.nextUrl;
 
   if (!isSignedIn && !authPaths.has(pathname) && !pathname.startsWith("/auth/")) {
+    const hasExpiredOAuthState = request.nextUrl.searchParams.get("error_code") === "bad_oauth_state";
     const loginUrl = request.nextUrl.clone();
     loginUrl.pathname = "/login";
     loginUrl.search = "";
     loginUrl.searchParams.set("next", pathname);
+    if (hasExpiredOAuthState) {
+      loginUrl.searchParams.set("error", "oauth_state");
+    }
     return redirectWithCookies(response, loginUrl);
   }
 

@@ -145,13 +145,49 @@ def test_provider_exception_is_controlled() -> None:
     with create_test_client(FakeRepository()) as client:
         client.app.dependency_overrides[get_analyzer] = lambda: analyzer
         response = client.post("/api/v1/analyze/text", json={"text": "hello"})
-    assert response.status_code == 502
+    assert response.status_code == 503
     assert response.json()["error"]["code"] == "provider_unavailable"
 
 
 def test_gemini_uses_supported_structured_output_configuration() -> None:
     config = GeminiProvider._json_config()
     assert config == {"response_mime_type": "application/json", "response_schema": ScamAssessment}
+
+
+def test_gemini_retries_a_transient_provider_error(monkeypatch) -> None:
+    class TransientError(Exception):
+        code = 503
+
+    assessment = ScamAssessment(
+        risk_score=8,
+        risk_level="SAFE",
+        scam_type="No Clear Scam Pattern",
+        confidence=0.72,
+        red_flags=[],
+        explanation="No clear scam pattern.",
+        recommendation=["Verify unexpected requests through a trusted channel."],
+    )
+
+    class FakeModels:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        async def generate_content(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise TransientError()
+            return type("Response", (), {"text": assessment.model_dump_json()})()
+
+    models = FakeModels()
+    provider = GeminiProvider.__new__(GeminiProvider)
+    provider.client = type("Client", (), {"aio": type("AsyncClient", (), {"models": models})()})()
+    provider.model = "test-model"
+    monkeypatch.setattr(GeminiProvider, "_RETRY_DELAY_SECONDS", 0)
+
+    result = asyncio.run(provider.analyze_text("Check this message", "text"))
+
+    assert models.calls == 2
+    assert result.raw_json == assessment.model_dump_json()
 
 
 def test_analysis_is_persisted_when_repository_is_available() -> None:

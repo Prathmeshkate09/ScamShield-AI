@@ -69,7 +69,14 @@ export function AuthCard({ mode }: AuthCardProps) {
   const [confirmPassword, setConfirmPassword] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [notice, setNotice] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(searchParams.get("error") === "callback" ? "That sign-in link is invalid or has expired. Please try again." : null);
+  const authError = searchParams.get("error");
+  const [error, setError] = useState<string | null>(
+    authError === "callback"
+      ? "That sign-in link is invalid or has expired. Please try again."
+      : authError === "oauth_state"
+        ? "That Google sign-in request expired or was already used. Start a new sign-in."
+        : null,
+  );
   const isConfigured = isSupabaseConfigured();
   const currentCopy = copy[mode];
   const needsEmail = mode !== "reset";
