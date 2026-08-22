@@ -19,17 +19,19 @@ export default async function HomePage({ searchParams }: HomePageProps) {
   }
 
   const supabase = await createClient();
-  const { data } = await supabase.auth.getClaims();
-  const claims = data?.claims;
-  if (!claims?.sub) {
+  const { data: { user }, error: userError } = await supabase.auth.getUser();
+  if (userError || !user) {
     redirect(hasExpiredOAuthState ? "/login?error=oauth_state" : "/login");
+  }
+
+  if (!user.email_confirmed_at) {
+    redirect("/verify-email");
   }
 
   if (hasExpiredOAuthState) {
     redirect("/");
   }
 
-  const { data: { user } } = await supabase.auth.getUser();
-  const userEmail = user?.email ?? (typeof claims.email === "string" ? claims.email : "Protected account");
+  const userEmail = user.email ?? "Protected account";
   return <Dashboard userEmail={userEmail} />;
 }

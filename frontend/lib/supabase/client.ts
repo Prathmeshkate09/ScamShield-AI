@@ -1,6 +1,6 @@
 import { createBrowserClient } from "@supabase/ssr";
 
-import { getSupabaseConfig } from "@/lib/supabase/config";
+import { getAuthCookieOptions, getSupabaseConfig } from "@/lib/supabase/config";
 
 export function createClient() {
   const config = getSupabaseConfig();
@@ -8,5 +8,7 @@ export function createClient() {
     throw new Error("Supabase authentication is not configured.");
   }
 
-  return createBrowserClient(config.url, config.publishableKey);
+  return createBrowserClient(config.url, config.publishableKey, {
+    cookieOptions: getAuthCookieOptions()
+  });
 }

@@ -18,6 +18,18 @@ export function isSupabaseConfigured(): boolean {
   return getSupabaseConfig() !== null;
 }
 
+export function getTurnstileSiteKey(): string | null {
+  return process.env.NEXT_PUBLIC_TURNSTILE_SITE_KEY || null;
+}
+
+export function getAuthCookieOptions() {
+  return {
+    path: "/",
+    sameSite: "lax" as const,
+    secure: process.env.NODE_ENV === "production"
+  };
+}
+
 export function getSiteUrl(): string {
   if (typeof window !== "undefined") {
     return window.location.origin;

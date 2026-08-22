@@ -1,5 +1,6 @@
 "use client";
 
+import { Turnstile, type TurnstileInstance } from "@marsidev/react-turnstile";
 import {
   AlertTriangle,
   ArrowRight,
@@ -12,26 +13,25 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import { useRouter, useSearchParams } from "next/navigation";
-import { FormEvent, useState } from "react";
+import { FormEvent, useEffect, useRef, useState } from "react";
 
+import {
+  MAX_PASSWORD_LENGTH,
+  MIN_PASSWORD_LENGTH,
+  buildCallbackUrl,
+  normalizeEmail,
+  safeNextPath,
+  validateNewPassword
+} from "@/lib/auth";
 import { createClient } from "@/lib/supabase/client";
-import { getSiteUrl, isSupabaseConfigured } from "@/lib/supabase/config";
+import { getSiteUrl, getTurnstileSiteKey, isSupabaseConfigured } from "@/lib/supabase/config";
 
-type AuthMode = "login" | "signup" | "forgot" | "reset";
+type AuthMode = "login" | "signup" | "verify" | "forgot" | "reset";
 
 type AuthCardProps = {
   mode: AuthMode;
+  recoveryAllowed?: boolean;
 };
-
-function safeNextPath(value: string | null): string {
-  return value?.startsWith("/") && !value.startsWith("//") ? value : "/";
-}
-
-function callbackUrl(next: string): string {
-  const url = new URL("/auth/callback", getSiteUrl());
-  url.searchParams.set("next", next);
-  return url.toString();
-}
 
 const copy = {
   login: {
@@ -43,70 +43,121 @@ const copy = {
   signup: {
     eyebrow: "Private protection",
     title: "Create your shield.",
-    description: "Use your email to create a private ScamShield workspace with isolated scan history.",
+    description: "Create a private ScamShield workspace using any valid email address.",
     submit: "Create secure account"
+  },
+  verify: {
+    eyebrow: "Verify ownership",
+    title: "Check your inbox.",
+    description: "Enter your signup email to request another verification link.",
+    submit: "Resend verification email"
   },
   forgot: {
     eyebrow: "Account recovery",
     title: "Reset your password.",
-    description: "Enter your email and we will send a secure reset link if an account exists.",
+    description: "If you use email and password, enter your email to request a secure reset link.",
     submit: "Send reset link"
   },
   reset: {
     eyebrow: "Account recovery",
     title: "Choose a new password.",
-    description: "Use a strong, unique password to protect your personal scam history.",
+    description: "Use a strong, unique passphrase to protect your personal scam history.",
     submit: "Update password"
   }
 } satisfies Record<AuthMode, { eyebrow: string; title: string; description: string; submit: string }>;
 
-export function AuthCard({ mode }: AuthCardProps) {
+function initialError(code: string | null, recoveryAllowed: boolean): string | null {
+  if (code === "oauth_state") {
+    return "That Google sign-in request expired or was already used. Start a new sign-in.";
+  }
+  if (code === "account_unavailable") {
+    return "This account cannot sign in. Contact the project owner if you believe this is a mistake.";
+  }
+  if (code === "configuration") {
+    return "Authentication is not configured for this environment.";
+  }
+  if (code === "invalid_link" || code === "callback") {
+    return "That authentication link is invalid or has expired. Request a new link.";
+  }
+  if (!recoveryAllowed) {
+    return "Open the latest password-reset link from your email before choosing a new password.";
+  }
+  return null;
+}
+
+export function AuthCard({ mode, recoveryAllowed = true }: AuthCardProps) {
   const router = useRouter();
   const searchParams = useSearchParams();
   const next = safeNextPath(searchParams.get("next"));
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
+  const [captchaToken, setCaptchaToken] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
-  const [notice, setNotice] = useState<string | null>(null);
-  const authError = searchParams.get("error");
-  const [error, setError] = useState<string | null>(
-    authError === "callback"
-      ? "That sign-in link is invalid or has expired. Please try again."
-      : authError === "oauth_state"
-        ? "That Google sign-in request expired or was already used. Start a new sign-in."
+  const [notice, setNotice] = useState<string | null>(
+    searchParams.get("message") === "password_reset"
+      ? "Your password was changed and existing sessions were revoked. Sign in with your new password."
+      : searchParams.get("sent") === "verification"
+        ? "Check your inbox for a verification link."
         : null,
   );
+  const [error, setError] = useState<string | null>(initialError(searchParams.get("error"), mode !== "reset" || recoveryAllowed));
+  const turnstileRef = useRef<TurnstileInstance | undefined>(undefined);
   const isConfigured = isSupabaseConfigured();
+  const turnstileSiteKey = getTurnstileSiteKey();
   const currentCopy = copy[mode];
   const needsEmail = mode !== "reset";
   const needsPassword = mode === "login" || mode === "signup" || mode === "reset";
+  const requiresCaptcha = Boolean(turnstileSiteKey) && mode !== "reset";
+  const canSubmit = isConfigured && !isSubmitting && (mode !== "reset" || recoveryAllowed) && (!requiresCaptcha || Boolean(captchaToken));
+
+  useEffect(() => {
+    if (mode === "verify") {
+      const pendingEmail = sessionStorage.getItem("scamshield.pendingVerificationEmail");
+      if (pendingEmail) {
+        setEmail(pendingEmail);
+      }
+    }
+  }, [mode]);
+
+  const callbackUrl = (nextPath: string) => buildCallbackUrl(getSiteUrl(), nextPath);
+
+  const resetCaptcha = () => {
+    if (requiresCaptcha) {
+      setCaptchaToken(null);
+      turnstileRef.current?.reset();
+    }
+  };
 
   const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
-    if (!isConfigured || isSubmitting) {
+    if (!canSubmit) {
       return;
     }
 
     setError(null);
     setNotice(null);
 
-    if ((mode === "signup" || mode === "reset") && password.length < 12) {
-      setError("Use at least 12 characters for your password.");
-      return;
-    }
-    if ((mode === "signup" || mode === "reset") && password !== confirmPassword) {
-      setError("The passwords do not match.");
-      return;
+    if (mode === "signup" || mode === "reset") {
+      const passwordError = validateNewPassword(password, confirmPassword);
+      if (passwordError) {
+        setError(passwordError);
+        return;
+      }
     }
 
+    const normalizedEmail = normalizeEmail(email);
     setIsSubmitting(true);
     try {
       const supabase = createClient();
       if (mode === "login") {
-        const { error: signInError } = await supabase.auth.signInWithPassword({ email, password });
+        const { error: signInError } = await supabase.auth.signInWithPassword({
+          email: normalizedEmail,
+          password,
+          options: { captchaToken: captchaToken ?? undefined }
+        });
         if (signInError) {
-          setError("Unable to sign in with those details. Check your email and password, then try again.");
+          setError("Unable to sign in with those details. Verify your email, check your password, and try again.");
           return;
         }
         router.replace(next);
@@ -116,12 +167,15 @@ export function AuthCard({ mode }: AuthCardProps) {
 
       if (mode === "signup") {
         const { data, error: signUpError } = await supabase.auth.signUp({
-          email,
+          email: normalizedEmail,
           password,
-          options: { emailRedirectTo: callbackUrl("/") }
+          options: {
+            captchaToken: captchaToken ?? undefined,
+            emailRedirectTo: callbackUrl("/")
+          }
         });
         if (signUpError) {
-          setError("We could not create your account. Try a different email or try again shortly.");
+          setError("We could not submit that signup. Check the details and try again shortly.");
           return;
         }
         if (data.session) {
@@ -129,28 +183,60 @@ export function AuthCard({ mode }: AuthCardProps) {
           router.refresh();
           return;
         }
-        setNotice("Check your inbox to confirm your email address, then return here to sign in.");
+        sessionStorage.setItem("scamshield.pendingVerificationEmail", normalizedEmail);
+        router.replace("/verify-email?sent=verification");
+        return;
+      }
+
+      if (mode === "verify") {
+        const { error: resendError } = await supabase.auth.resend({
+          type: "signup",
+          email: normalizedEmail,
+          options: {
+            captchaToken: captchaToken ?? undefined,
+            emailRedirectTo: callbackUrl("/")
+          }
+        });
+        if (resendError) {
+          setError("We could not send a verification email right now. Wait a moment and try again.");
+          return;
+        }
+        setNotice("If that signup is awaiting verification, a new confirmation link is on its way.");
         return;
       }
 
       if (mode === "forgot") {
-        await supabase.auth.resetPasswordForEmail(email, { redirectTo: callbackUrl("/reset-password") });
+        const { error: recoveryError } = await supabase.auth.resetPasswordForEmail(normalizedEmail, {
+          captchaToken: captchaToken ?? undefined,
+          redirectTo: callbackUrl("/reset-password")
+        });
+        if (recoveryError) {
+          setError("We could not submit account recovery right now. Wait a moment and try again.");
+          return;
+        }
         setNotice("If an account exists for that email, a secure password-reset link is on its way.");
         return;
       }
 
       const { error: updateError } = await supabase.auth.updateUser({ password });
       if (updateError) {
-        setError("This recovery link is invalid or expired. Request a new password-reset link.");
+        setError("This recovery session is invalid or expired. Request a new password-reset link.");
         return;
       }
-      setNotice("Password updated. You can now continue to your protected dashboard.");
-      router.replace("/");
+
+      const { error: signOutError } = await supabase.auth.signOut({ scope: "global" });
+      await fetch("/auth/recovery-complete", { method: "POST" });
+      if (signOutError) {
+        setError("Your password changed, but session revocation did not complete. Sign out on every device and contact the project owner.");
+        return;
+      }
+      router.replace("/login?message=password_reset");
       router.refresh();
     } catch {
       setError("Authentication is temporarily unavailable. Please try again.");
     } finally {
       setIsSubmitting(false);
+      resetCaptcha();
     }
   };
 
@@ -166,7 +252,7 @@ export function AuthCard({ mode }: AuthCardProps) {
         options: { redirectTo: callbackUrl(next) }
       });
       if (oauthError) {
-        setError("Google sign-in is not available yet. Use email and password or finish the provider setup.");
+        setError("Google sign-in is temporarily unavailable. Use email and password or try again shortly.");
       }
     } catch {
       setError("Google sign-in is temporarily unavailable. Please try again.");
@@ -174,6 +260,8 @@ export function AuthCard({ mode }: AuthCardProps) {
       setIsSubmitting(false);
     }
   };
+
+  const showForm = mode !== "reset" || recoveryAllowed;
 
   return (
     <main className="auth-shell">
@@ -191,7 +279,7 @@ export function AuthCard({ mode }: AuthCardProps) {
         </div>
         <ul className="auth-assurances">
           <li><CheckCircle2 size={17} /> Private, account-scoped history</li>
-          <li><CheckCircle2 size={17} /> Secure Supabase authentication</li>
+          <li><CheckCircle2 size={17} /> Verified account ownership</li>
           <li><CheckCircle2 size={17} /> Protected AI-analysis API</li>
         </ul>
       </section>
@@ -208,30 +296,44 @@ export function AuthCard({ mode }: AuthCardProps) {
         {error && <p className="auth-message error-message"><AlertTriangle size={16} /> {error}</p>}
         {notice && <p className="auth-message success-message"><CheckCircle2 size={16} /> {notice}</p>}
 
-        <form className="auth-form" onSubmit={(event) => void handleSubmit(event)}>
-          {needsEmail && (
-            <label>
-              <span>Email address</span>
-              <span className="auth-input"><Mail size={17} /><input autoComplete="email" disabled={!isConfigured || isSubmitting} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" required type="email" value={email} /></span>
-            </label>
-          )}
-          {needsPassword && (
-            <label>
-              <span>{mode === "reset" ? "New password" : "Password"}</span>
-              <span className="auth-input"><LockKeyhole size={17} /><input autoComplete={mode === "reset" ? "new-password" : mode === "signup" ? "new-password" : "current-password"} disabled={!isConfigured || isSubmitting} minLength={mode === "signup" || mode === "reset" ? 12 : 1} onChange={(event) => setPassword(event.target.value)} placeholder={mode === "reset" || mode === "signup" ? "At least 12 characters" : "Your password"} required type="password" value={password} /></span>
-            </label>
-          )}
-          {(mode === "signup" || mode === "reset") && (
-            <label>
-              <span>Confirm password</span>
-              <span className="auth-input"><LockKeyhole size={17} /><input autoComplete="new-password" disabled={!isConfigured || isSubmitting} minLength={12} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Repeat your new password" required type="password" value={confirmPassword} /></span>
-            </label>
-          )}
-          <button className="primary-button auth-submit" disabled={!isConfigured || isSubmitting} type="submit">
-            {isSubmitting ? <LoaderCircle className="spin" size={18} /> : <ArrowRight size={18} />}
-            {isSubmitting ? "Securing your session..." : currentCopy.submit}
-          </button>
-        </form>
+        {showForm && (
+          <form className="auth-form" onSubmit={(event) => void handleSubmit(event)}>
+            {needsEmail && (
+              <label>
+                <span>Email address</span>
+                <span className="auth-input"><Mail size={17} /><input autoCapitalize="none" autoComplete="email" disabled={!isConfigured || isSubmitting} inputMode="email" maxLength={254} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" required spellCheck={false} type="email" value={email} /></span>
+              </label>
+            )}
+            {needsPassword && (
+              <label>
+                <span>{mode === "reset" ? "New password" : "Password"}</span>
+                <span className="auth-input"><LockKeyhole size={17} /><input autoComplete={mode === "reset" || mode === "signup" ? "new-password" : "current-password"} disabled={!isConfigured || isSubmitting} maxLength={MAX_PASSWORD_LENGTH} minLength={mode === "signup" || mode === "reset" ? MIN_PASSWORD_LENGTH : 1} onChange={(event) => setPassword(event.target.value)} placeholder={mode === "reset" || mode === "signup" ? "At least 12 characters" : "Your password"} required type="password" value={password} /></span>
+              </label>
+            )}
+            {(mode === "signup" || mode === "reset") && (
+              <label>
+                <span>Confirm password</span>
+                <span className="auth-input"><LockKeyhole size={17} /><input autoComplete="new-password" disabled={!isConfigured || isSubmitting} maxLength={MAX_PASSWORD_LENGTH} minLength={MIN_PASSWORD_LENGTH} onChange={(event) => setConfirmPassword(event.target.value)} placeholder="Repeat your new password" required type="password" value={confirmPassword} /></span>
+              </label>
+            )}
+            {turnstileSiteKey && mode !== "reset" && (
+              <div className="auth-captcha" aria-label="Bot protection challenge">
+                <Turnstile
+                  onError={() => setError("Bot protection could not load. Refresh the page and try again.")}
+                  onExpire={() => setCaptchaToken(null)}
+                  onSuccess={setCaptchaToken}
+                  options={{ action: `auth-${mode}`, size: "flexible", theme: "dark" }}
+                  ref={turnstileRef}
+                  siteKey={turnstileSiteKey}
+                />
+              </div>
+            )}
+            <button className="primary-button auth-submit" disabled={!canSubmit} type="submit">
+              {isSubmitting ? <LoaderCircle className="spin" size={18} /> : <ArrowRight size={18} />}
+              {isSubmitting ? "Securing your request..." : currentCopy.submit}
+            </button>
+          </form>
+        )}
 
         {(mode === "login" || mode === "signup") && (
           <>
@@ -243,8 +345,9 @@ export function AuthCard({ mode }: AuthCardProps) {
         )}
 
         <div className="auth-links">
-          {mode === "login" && <><Link href="/forgot-password">Forgot password?</Link><span>New to ScamShield? <Link href="/signup">Create an account</Link></span></>}
+          {mode === "login" && <><Link href="/forgot-password">Forgot email password?</Link><span>New to ScamShield? <Link href="/signup">Create an account</Link></span><Link href="/verify-email">Resend verification</Link></>}
           {mode === "signup" && <span>Already protected? <Link href="/login">Sign in</Link></span>}
+          {mode === "verify" && <span>Already verified? <Link href="/login">Sign in</Link></span>}
           {mode === "forgot" && <span>Remembered it? <Link href="/login">Back to sign in</Link></span>}
           {mode === "reset" && <span>Need a new link? <Link href="/forgot-password">Request password reset</Link></span>}
         </div>

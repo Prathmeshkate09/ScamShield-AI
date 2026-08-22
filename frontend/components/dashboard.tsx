@@ -245,9 +245,14 @@ export function Dashboard({ userEmail }: { userEmail: string }) {
   const signOut = async () => {
     setIsSigningOut(true);
     try {
-      await createClient().auth.signOut();
-    } finally {
+      const { error: signOutError } = await createClient().auth.signOut({ scope: "global" });
+      if (signOutError) {
+        setError("Sign out did not complete. Try again before leaving this device unattended.");
+        return;
+      }
       window.location.assign("/login");
+    } finally {
+      setIsSigningOut(false);
     }
   };
 

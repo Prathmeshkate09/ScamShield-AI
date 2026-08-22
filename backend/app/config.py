@@ -28,6 +28,7 @@ class Settings(BaseSettings):
     rate_limit_user_per_window: int = Field(default=60, ge=1, le=10_000)
     rate_limit_scan_per_window: int = Field(default=10, ge=1, le=10_000)
     rate_limit_image_per_window: int = Field(default=4, ge=1, le=10_000)
+    auth_strict_session_validation: bool | None = None
     local_auth_schema_enabled: bool = False
     ai_provider: Literal["auto", "openai", "gemini", "demo"] = "auto"
     openai_api_key: str | None = None
@@ -66,6 +67,12 @@ class Settings(BaseSettings):
     @property
     def auth_configured(self) -> bool:
         return bool(self.supabase_url and self.supabase_public_key)
+
+    @property
+    def require_active_auth_session(self) -> bool:
+        if self.auth_strict_session_validation is not None:
+            return self.auth_strict_session_validation
+        return self.app_env == "production"
 
     @property
     def rate_limiter_configured(self) -> bool:
