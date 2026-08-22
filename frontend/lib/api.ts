@@ -34,9 +34,18 @@ async function request<T>(path: string, options?: RequestInit, requireAuthentica
     }
   });
 
-  const payload = (await response.json().catch(() => null)) as ApiSuccess<T> | { error?: { message?: string } } | null;
+  const payload = (await response.json().catch(() => null)) as ApiSuccess<T> | { error?: { code?: string; message?: string } } | null;
   if (!response.ok || !payload || !("success" in payload) || !payload.success) {
-    const message = payload && "error" in payload ? payload.error?.message : "The security service could not complete this request.";
+    const apiError = payload && "error" in payload ? payload.error : undefined;
+    if (requireAuthentication && typeof window !== "undefined") {
+      if (apiError?.code === "email_verification_required") {
+        window.location.assign("/verify-email");
+      } else if (response.status === 401 || apiError?.code === "account_unavailable") {
+        await createClient().auth.signOut({ scope: "local" });
+        window.location.assign(apiError?.code === "account_unavailable" ? "/login?error=account_unavailable" : "/login");
+      }
+    }
+    const message = apiError?.message ?? "The security service could not complete this request.";
     throw new ApiError(message ?? "The security service could not complete this request.", response.status);
   }
   return payload;

@@ -9,7 +9,14 @@ from PIL import Image
 from sqlalchemy.exc import OperationalError
 
 from app.config import Settings
-from app.core.errors import AuthenticationRequiredError, DatabaseUnavailableError, RateLimiterUnavailableError, RateLimitExceededError
+from app.core.errors import (
+    AccountUnavailableError,
+    AuthenticationRequiredError,
+    DatabaseUnavailableError,
+    EmailVerificationRequiredError,
+    RateLimiterUnavailableError,
+    RateLimitExceededError,
+)
 from app.dependencies import get_analyzer, get_auth_service, get_current_user, get_repository, get_storage_service
 from app.main import create_app
 from app.repositories.analysis_repository import AnalysisRepository
@@ -282,6 +289,32 @@ def test_invalid_token_is_rejected() -> None:
         response = client.post("/api/v1/analyze/text", headers={"Authorization": "Bearer invalid"}, json={"text": "Check this message"})
     assert response.status_code == 401
     assert response.json()["error"]["code"] == "authentication_required"
+
+
+@pytest.mark.parametrize(
+    "auth_error,expected_code",
+    [
+        (EmailVerificationRequiredError(), "email_verification_required"),
+        (AccountUnavailableError(), "account_unavailable"),
+    ],
+)
+def test_unverified_or_disabled_accounts_receive_controlled_errors(auth_error, expected_code: str) -> None:
+    class RestrictedAuthService:
+        async def get_user(self, access_token):
+            raise auth_error
+
+    application = create_app(Settings(app_env="test", ai_provider="demo", database_url=None))
+    application.dependency_overrides[get_auth_service] = lambda: RestrictedAuthService()
+    application.dependency_overrides[get_repository] = lambda: FakeRepository()
+    with TestClient(application) as client:
+        response = client.post(
+            "/api/v1/analyze/text",
+            headers={"Authorization": "Bearer restricted"},
+            json={"text": "Check this message"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["error"]["code"] == expected_code
 
 
 def test_user_history_and_detail_are_isolated() -> None:

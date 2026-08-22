@@ -45,6 +45,16 @@ class AuthenticationRequiredError(AppError):
         super().__init__("A valid sign-in session is required.", 401, "authentication_required", {"WWW-Authenticate": "Bearer"})
 
 
+class EmailVerificationRequiredError(AppError):
+    def __init__(self) -> None:
+        super().__init__("Verify your email address before using ScamShield.", 403, "email_verification_required")
+
+
+class AccountUnavailableError(AppError):
+    def __init__(self) -> None:
+        super().__init__("This account is not permitted to access ScamShield.", 403, "account_unavailable")
+
+
 class AuthenticationUnavailableError(AppError):
     def __init__(self) -> None:
         super().__init__("Authentication verification is temporarily unavailable.", 503, "authentication_unavailable")

@@ -112,6 +112,7 @@ npm run dev
 | `UPSTASH_REDIS_REST_URL` / `UPSTASH_REDIS_REST_TOKEN` | Backend-only shared Redis rate-limiter credentials |
 | `RATE_LIMIT_ENABLED` | Must be `true` in Render/production; disabled for a credential-free local demo |
 | `RATE_LIMIT_*_PER_WINDOW` | Configurable health, user, scan, and image limits for the configured window |
+| `AUTH_STRICT_SESSION_VALIDATION` | Checks the verified JWT `session_id` against `auth.sessions`; defaults on in production and off outside production |
 | `LOCAL_AUTH_SCHEMA_ENABLED` | Local-only development shim for Docker PostgreSQL; keep `false` in Supabase/Render |
 | `AI_PROVIDER` | `auto`, `openai`, `gemini`, or `demo` |
 | `OPENAI_API_KEY` / `OPENAI_MODEL` | OpenAI configuration |
@@ -129,6 +130,7 @@ With `AI_PROVIDER=auto`, ScamShield chooses OpenAI when `OPENAI_API_KEY` exists,
 | `NEXT_PUBLIC_SUPABASE_URL` | Public Supabase project URL |
 | `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY` | Public Supabase browser key |
 | `NEXT_PUBLIC_SITE_URL` | Current frontend origin, such as `http://localhost:3000` |
+| `NEXT_PUBLIC_TURNSTILE_SITE_KEY` | Optional public Cloudflare Turnstile site key; required when CAPTCHA is enabled in Supabase Auth |
 
 Never place database credentials, service-role keys, or AI keys in a `NEXT_PUBLIC_` variable.
 
@@ -154,10 +156,16 @@ For screenshot upload, configure `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY`.
 
 ### Configure Supabase Auth
 
+ScamShield is a public application. It accepts valid Gmail, Outlook, corporate, and other email domains; there is no client-only domain filter. Existing Google users remain unchanged, and Supabase automatically links a new Google identity only when the provider supplies the same verified email address.
+
 1. In **Authentication → Providers**, enable Email and keep email confirmation enabled.
 2. In **Authentication → URL Configuration**, set the Site URL and add `http://localhost:3000/auth/callback` plus the Vercel `https://<your-domain>/auth/callback` redirect URL.
 3. Copy the project URL and **publishable** key from the Connect dialog to the root `.env` and backend environment. Never use the service-role key in the frontend.
 4. The default Supabase email sender is rate-limited for development. Configure custom SMTP before production email volume. See the [password authentication guide](https://supabase.com/docs/guides/auth/passwords).
+
+Before production launch, also set the minimum password length to at least 12, enable leaked-password protection, and review the hosted Auth rate limits. For bot protection, create a Cloudflare Turnstile widget, configure its secret in Supabase Authentication bot protection, and deploy the matching site key as `NEXT_PUBLIC_TURNSTILE_SITE_KEY`. Do not enable CAPTCHA in Supabase before the site key is deployed, or email/password forms will fail closed. New Free-plan projects using the default SMTP cannot customize auth templates, so production-branded verification and recovery email requires custom SMTP.
+
+The UI provides signup, verification resend, password login, generic account recovery, protected password reset, Google OAuth, and global logout. Password-reset links create a short-lived recovery state, and a successful reset revokes existing sessions before requiring a new login. Supabase owns password hashing, one-time token hashing and expiry, email uniqueness, PKCE, OAuth state, and verified-email identity linking; ScamShield does not duplicate those mechanisms.
 
 ### Configure Google Login
 
@@ -221,10 +229,11 @@ cd backend
 pytest -q
 ```
 
-The suite covers health, authenticated text analysis, missing/invalid tokens, empty and invalid input, URL safety checks, file rejection, malformed provider output, user-owned persistence and history isolation, scoped image paths, and rate-limit thresholds/outages.
+The suites cover health, authenticated text analysis, missing/invalid tokens, verified and disabled account handling, email normalization, password policy, callback open-redirect prevention, empty and invalid input, URL safety checks, file rejection, malformed provider output, user-owned persistence and history isolation, scoped image paths, and rate-limit thresholds/outages.
 
 ```bash
 cd frontend
+npm test
 npm run typecheck
 npm run build
 ```
@@ -234,7 +243,7 @@ npm run build
 ### Vercel Frontend
 
 1. Import the repository and set the root directory to `frontend`.
-2. Set `NEXT_PUBLIC_API_BASE_URL`, `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, and `NEXT_PUBLIC_SITE_URL`.
+2. Set `NEXT_PUBLIC_API_BASE_URL`, `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_PUBLISHABLE_KEY`, `NEXT_PUBLIC_SITE_URL`, and optionally `NEXT_PUBLIC_TURNSTILE_SITE_KEY`.
 3. Add the deployed `https://<vercel-domain>/auth/callback` URL in Supabase Auth before enabling Google or password-reset emails.
 4. Deploy with the default Next.js build command.
 

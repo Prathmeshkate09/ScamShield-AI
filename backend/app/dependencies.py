@@ -4,7 +4,7 @@ from fastapi import Depends, Request
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from app.config import Settings
-from app.core.errors import AuthenticationRequiredError, PersistenceUnavailableError
+from app.core.errors import AuthenticationRequiredError, AuthenticationUnavailableError, PersistenceUnavailableError
 from app.database import Database
 from app.repositories.analysis_repository import AnalysisRepository
 from app.services.ai_service import select_provider
@@ -43,10 +43,22 @@ def get_rate_limiter(request: Request) -> RateLimitService:
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     auth_service: SupabaseAuthService = Depends(get_auth_service),
+    database: Database = Depends(get_database),
+    settings: Settings = Depends(get_settings),
 ) -> AuthenticatedUser:
     if credentials is None or credentials.scheme.lower() != "bearer" or not credentials.credentials:
         raise AuthenticationRequiredError()
-    return await auth_service.get_user(credentials.credentials)
+    user = await auth_service.get_user(credentials.credentials)
+    if settings.require_active_auth_session:
+        if user.session_id is None:
+            raise AuthenticationRequiredError()
+        try:
+            session_is_active = await database.auth_session_is_active(user.id, user.session_id)
+        except Exception as error:
+            raise AuthenticationUnavailableError() from error
+        if not session_is_active:
+            raise AuthenticationRequiredError()
+    return user
 
 
 async def require_standard_rate_limit(

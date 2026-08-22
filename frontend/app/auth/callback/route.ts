@@ -1,11 +1,8 @@
 import { NextResponse, type NextRequest } from "next/server";
 
+import { safeNextPath } from "@/lib/auth";
 import { isSupabaseConfigured } from "@/lib/supabase/config";
 import { createClient } from "@/lib/supabase/server";
-
-function safeNextPath(value: string | null): string {
-  return value?.startsWith("/") && !value.startsWith("//") ? value : "/";
-}
 
 export async function GET(request: NextRequest) {
   const url = new URL(request.url);
@@ -23,10 +20,27 @@ export async function GET(request: NextRequest) {
     const supabase = await createClient();
     const { error } = await supabase.auth.exchangeCodeForSession(code);
     if (!error) {
-      return NextResponse.redirect(new URL(next, siteUrl));
+      const response = NextResponse.redirect(new URL(next, siteUrl));
+      if (next === "/reset-password") {
+        response.cookies.set({
+          name: "scamshield-recovery",
+          value: "1",
+          httpOnly: true,
+          maxAge: 15 * 60,
+          path: "/reset-password",
+          sameSite: "lax",
+          secure: request.nextUrl.protocol === "https:"
+        });
+      }
+      return response;
     }
   }
 
-  fallback.searchParams.set("error", "callback");
+  if (next === "/reset-password") {
+    fallback.pathname = "/reset-password";
+    fallback.searchParams.set("error", "invalid_link");
+  } else {
+    fallback.searchParams.set("error", "callback");
+  }
   return NextResponse.redirect(fallback);
 }

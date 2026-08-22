@@ -1,9 +1,10 @@
 import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
-import { getSupabaseConfig } from "@/lib/supabase/config";
+import { getAuthCookieOptions, getSupabaseConfig } from "@/lib/supabase/config";
 
-const authPaths = new Set(["/login", "/signup", "/forgot-password", "/reset-password"]);
+const publicOnlyAuthPaths = new Set(["/login", "/signup", "/forgot-password", "/verify-email"]);
+const accessibleAuthPaths = new Set([...publicOnlyAuthPaths, "/reset-password"]);
 
 function redirectWithCookies(response: NextResponse, destination: URL): NextResponse {
   const redirect = NextResponse.redirect(destination);
@@ -19,6 +20,7 @@ export async function updateSession(request: NextRequest): Promise<NextResponse>
 
   let response = NextResponse.next({ request });
   const supabase = createServerClient(config.url, config.publishableKey, {
+    cookieOptions: getAuthCookieOptions(),
     cookies: {
       getAll() {
         return request.cookies.getAll();
@@ -31,12 +33,12 @@ export async function updateSession(request: NextRequest): Promise<NextResponse>
     }
   });
 
-  const { data } = await supabase.auth.getClaims();
-  const claims = data?.claims;
-  const isSignedIn = Boolean(claims?.sub);
+  const { data: { user } } = await supabase.auth.getUser();
+  const isSignedIn = Boolean(user?.id);
+  const isEmailVerified = Boolean(user?.email_confirmed_at);
   const { pathname } = request.nextUrl;
 
-  if (!isSignedIn && !authPaths.has(pathname) && !pathname.startsWith("/auth/")) {
+  if (!isSignedIn && !accessibleAuthPaths.has(pathname) && !pathname.startsWith("/auth/")) {
     const hasExpiredOAuthState = request.nextUrl.searchParams.get("error_code") === "bad_oauth_state";
     const loginUrl = request.nextUrl.clone();
     loginUrl.pathname = "/login";
@@ -48,7 +50,14 @@ export async function updateSession(request: NextRequest): Promise<NextResponse>
     return redirectWithCookies(response, loginUrl);
   }
 
-  if (isSignedIn && authPaths.has(pathname)) {
+  if (isSignedIn && !isEmailVerified && pathname !== "/verify-email" && !pathname.startsWith("/auth/")) {
+    const verifyUrl = request.nextUrl.clone();
+    verifyUrl.pathname = "/verify-email";
+    verifyUrl.search = "";
+    return redirectWithCookies(response, verifyUrl);
+  }
+
+  if (isSignedIn && isEmailVerified && publicOnlyAuthPaths.has(pathname)) {
     const dashboardUrl = request.nextUrl.clone();
     dashboardUrl.pathname = "/";
     dashboardUrl.search = "";
