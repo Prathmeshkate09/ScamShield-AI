@@ -53,6 +53,13 @@ class AnalysisRepository:
             red_flags=assessment.red_flags,
             explanation=assessment.explanation,
             recommendation=assessment.recommendation,
+            signals=[],
+            evidence=[],
+            extracted_urls=[],
+            url_intelligence=[],
+            attack_chain={"nodes": [], "edges": []},
+            incident_response=[],
+            scoring_version="v1",
         )
         async with self.session_factory() as session:
             try:
@@ -133,6 +140,16 @@ class AnalysisRepository:
             red_flags=record.red_flags,
             explanation=record.explanation,
             recommendation=record.recommendation,
+            signals=record.signals,
+            evidence=record.evidence,
+            extracted_urls=record.extracted_urls,
+            url_intelligence=record.url_intelligence,
+            attack_chain=record.attack_chain,
+            incident_response=record.incident_response,
+            analysis_duration_ms=record.analysis_duration_ms,
+            ai_provider=record.ai_provider,
+            model_name=record.model_name,
+            scoring_version=record.scoring_version,
             created_at=record.created_at,
         )
 

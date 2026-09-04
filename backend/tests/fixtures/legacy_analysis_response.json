@@ -1,0 +1,16 @@
+{
+  "id": "00000000-0000-4000-8000-000000000010",
+  "input_type": "text",
+  "risk_score": 65,
+  "risk_level": "HIGH",
+  "scam_type": "Social Engineering / Phishing",
+  "confidence": 0.78,
+  "red_flags": [
+    "Urgent action request"
+  ],
+  "explanation": "The message pressures the recipient to act before independently verifying the request.",
+  "recommendation": [
+    "Pause and verify the sender through an official channel."
+  ],
+  "created_at": "2026-09-04T00:00:00Z"
+}
