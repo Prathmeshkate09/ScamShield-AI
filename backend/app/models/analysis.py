@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime
+from typing import Any
 
-from sqlalchemy import DateTime, ForeignKey, Index, Integer, Numeric, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Index, Integer, Numeric, String, Text, func, text
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -36,4 +37,19 @@ class Analysis(Base):
     red_flags: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
     explanation: Mapped[str] = mapped_column(Text, nullable=False)
     recommendation: Mapped[list[str]] = mapped_column(JSONB, nullable=False)
+    signals: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False)
+    evidence: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False)
+    extracted_urls: Mapped[list[str]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False)
+    url_intelligence: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False)
+    attack_chain: Mapped[dict[str, Any]] = mapped_column(
+        JSONB,
+        default=lambda: {"nodes": [], "edges": []},
+        server_default=text("'{\"nodes\":[],\"edges\":[]}'::jsonb"),
+        nullable=False,
+    )
+    incident_response: Mapped[list[dict[str, Any]]] = mapped_column(JSONB, default=list, server_default=text("'[]'::jsonb"), nullable=False)
+    analysis_duration_ms: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    ai_provider: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    model_name: Mapped[str | None] = mapped_column(String(120), nullable=True)
+    scoring_version: Mapped[str] = mapped_column(String(30), default="v1", server_default="v1", nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), nullable=False)
